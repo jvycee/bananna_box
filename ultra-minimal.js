@@ -485,62 +485,332 @@ function parseGraphQLFilters(query, defaultProps) {
   return searchBody;
 }
 
-// MCP Tools
-const mcpTools = {
-  hubspot_contacts: async (args) => {
-    if (!CFG.hubspot) return { error: 'HubSpot not configured' };
-    try {
-      const response = await axios.get('https://api.hubapi.com/crm/v3/objects/contacts', {
-        headers: { Authorization: `Bearer ${CFG.hubspot}` }
-      });
-      return { success: true, contacts: response.data.results };
-    } catch (e) {
-      return { error: e.message };
-    }
-  },
-  
-  create_contact: async (args) => {
-    if (!CFG.hubspot) return { error: 'HubSpot not configured' };
-    try {
-      const response = await axios.post('https://api.hubapi.com/crm/v3/objects/contacts', {
-        properties: args
-      }, {
-        headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }
-      });
-      return { success: true, contact: response.data };
-    } catch (e) {
-      return { error: e.message };
-    }
-  },
-  
-  pi_stats: async () => ({ success: true, stats, pi: await checkPi() })
+// MCP Protocol Implementation - Ultra-minimal but spec-compliant
+const MCP_VERSION = "2024-11-05";
+
+// MCP Server Capabilities
+const mcpCapabilities = {
+  tools: {},
+  resources: {},
+  prompts: {},
+  logging: {}
 };
 
+// MCP Tools with proper schemas - HubSpot focused
+const mcpTools = {
+  "hubspot-list-objects": {
+    name: "hubspot-list-objects",
+    description: "List HubSpot CRM objects with pagination",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets", "products", "quotes", "line_items", "calls", "emails", "meetings", "notes", "tasks"] },
+        limit: { type: "number", minimum: 1, maximum: 100, default: 10 },
+        properties: { type: "array", items: { type: "string" } },
+        after: { type: "string", description: "Pagination cursor" }
+      },
+      required: ["object_type"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { error: 'HubSpot not configured' };
+      try {
+        const { object_type, limit = 10, properties, after } = args;
+        const params = new URLSearchParams();
+        if (limit) params.append('limit', limit);
+        if (properties) properties.forEach(prop => params.append('properties', prop));
+        if (after) params.append('after', after);
+        
+        const response = await axios.get(`https://api.hubapi.com/crm/v3/objects/${object_type}?${params}`, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}` }, timeout: 10000
+        });
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Error: ${e.message}` }] };
+      }
+    }
+  },
+
+  "hubspot-search-objects": {
+    name: "hubspot-search-objects", 
+    description: "Search HubSpot CRM objects with filters",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets", "products", "quotes", "line_items", "calls", "emails", "meetings", "notes", "tasks"] },
+        query: { type: "string", description: "Search query" },
+        filters: { type: "array", items: { type: "object" } },
+        properties: { type: "array", items: { type: "string" } },
+        limit: { type: "number", minimum: 1, maximum: 200, default: 10 }
+      },
+      required: ["object_type"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { error: 'HubSpot not configured' };
+      try {
+        const { object_type, query, filters, properties, limit = 10 } = args;
+        const searchBody = { limit };
+        if (query) searchBody.query = query;
+        if (filters) searchBody.filterGroups = [{ filters }];
+        if (properties) searchBody.properties = properties;
+        
+        const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${object_type}/search`, searchBody, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+        });
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Error: ${e.message}` }] };
+      }
+    }
+  },
+
+  "hubspot-create-object": {
+    name: "hubspot-create-object",
+    description: "Create a new HubSpot CRM object",
+    inputSchema: {
+      type: "object", 
+      properties: {
+        object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets", "products", "quotes", "line_items"] },
+        properties: { type: "object", description: "Object properties" }
+      },
+      required: ["object_type", "properties"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { error: 'HubSpot not configured' };
+      try {
+        const { object_type, properties } = args;
+        const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${object_type}`, { properties }, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+        });
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Error: ${e.message}` }] };
+      }
+    }
+  },
+
+  "hubspot-update-object": {
+    name: "hubspot-update-object",
+    description: "Update an existing HubSpot CRM object",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets", "products", "quotes", "line_items"] },
+        object_id: { type: "string", description: "Object ID" },
+        properties: { type: "object", description: "Properties to update" }
+      },
+      required: ["object_type", "object_id", "properties"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { error: 'HubSpot not configured' };
+      try {
+        const { object_type, object_id, properties } = args;
+        const response = await axios.patch(`https://api.hubapi.com/crm/v3/objects/${object_type}/${object_id}`, { properties }, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+        });
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Error: ${e.message}` }] };
+      }
+    }
+  },
+
+  "hubspot-create-engagement": {
+    name: "hubspot-create-engagement",
+    description: "Create HubSpot engagement (note, task, call, email, meeting)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        engagement_type: { type: "string", enum: ["notes", "tasks", "calls", "emails", "meetings"] },
+        properties: { type: "object", description: "Engagement properties" },
+        associations: { type: "array", items: { type: "object" }, description: "Object associations" }
+      },
+      required: ["engagement_type", "properties"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { error: 'HubSpot not configured' };
+      try {
+        const { engagement_type, properties, associations } = args;
+        const body = { properties };
+        if (associations) body.associations = associations;
+        
+        const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${engagement_type}`, body, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+        });
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Error: ${e.message}` }] };
+      }
+    }
+  },
+
+  "pi-stats": {
+    name: "pi-stats",
+    description: "Get Raspberry Pi system statistics and health",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      const pi = await checkPi();
+      const data = { stats, pi, uptime: process.uptime() };
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  }
+};
+
+// MCP Resources - Data exposure endpoints
+const mcpResources = {
+  "hubspot://contacts": {
+    uri: "hubspot://contacts",
+    name: "HubSpot Contacts",
+    description: "Access to HubSpot contacts data",
+    mimeType: "application/json",
+    handler: async () => {
+      if (!CFG.hubspot) return { contents: [{ uri: "hubspot://contacts", mimeType: "application/json", text: JSON.stringify({ error: "HubSpot not configured" }) }] };
+      try {
+        const response = await axios.get('https://api.hubapi.com/crm/v3/objects/contacts?limit=10', {
+          headers: { Authorization: `Bearer ${CFG.hubspot}` }
+        });
+        return { contents: [{ uri: "hubspot://contacts", mimeType: "application/json", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { contents: [{ uri: "hubspot://contacts", mimeType: "application/json", text: JSON.stringify({ error: e.message }) }] };
+      }
+    }
+  },
+
+  "pi://stats": {
+    uri: "pi://stats", 
+    name: "Pi System Stats",
+    description: "Current Raspberry Pi system statistics",
+    mimeType: "application/json",
+    handler: async () => {
+      const pi = await checkPi();
+      const data = { stats, pi, uptime: process.uptime() };
+      return { contents: [{ uri: "pi://stats", mimeType: "application/json", text: JSON.stringify(data, null, 2) }] };
+    }
+  }
+};
+
+// MCP JSON-RPC Endpoint - Spec compliant
+app.post('/mcp', async (req, res) => {
+  const { jsonrpc, method, params, id } = req.body;
+  
+  try {
+    // Validate JSON-RPC format
+    if (jsonrpc !== "2.0") {
+      return res.json({ jsonrpc: "2.0", id, error: { code: -32600, message: "Invalid Request" } });
+    }
+
+    switch (method) {
+      case "initialize":
+        res.json({
+          jsonrpc: "2.0", id,
+          result: {
+            protocolVersion: MCP_VERSION,
+            capabilities: {
+              tools: { listChanged: true },
+              resources: { subscribe: true, listChanged: true },
+              logging: {}
+            },
+            serverInfo: { name: "ultra-minimal-mcp", version: "1.0.0" }
+          }
+        });
+        break;
+
+      case "tools/list":
+        const tools = Object.values(mcpTools).map(tool => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema
+        }));
+        res.json({ jsonrpc: "2.0", id, result: { tools } });
+        break;
+
+      case "tools/call":
+        const { name, arguments: args } = params;
+        const tool = mcpTools[name];
+        if (!tool) {
+          return res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Tool not found" } });
+        }
+        const result = await tool.handler(args || {});
+        res.json({ jsonrpc: "2.0", id, result });
+        break;
+
+      case "resources/list":
+        const resources = Object.values(mcpResources).map(resource => ({
+          uri: resource.uri,
+          name: resource.name,
+          description: resource.description,
+          mimeType: resource.mimeType
+        }));
+        res.json({ jsonrpc: "2.0", id, result: { resources } });
+        break;
+
+      case "resources/read":
+        const { uri } = params;
+        const resource = mcpResources[uri];
+        if (!resource) {
+          return res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Resource not found" } });
+        }
+        const resourceResult = await resource.handler();
+        res.json({ jsonrpc: "2.0", id, result: resourceResult });
+        break;
+
+      default:
+        res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
+    }
+  } catch (error) {
+    res.json({ jsonrpc: "2.0", id, error: { code: -32603, message: "Internal error", data: error.message } });
+  }
+});
+
+// Legacy REST endpoints for backward compatibility
 app.post('/mcp/tool/:tool', async (req, res) => {
   const tool = mcpTools[req.params.tool];
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
   
-  const result = await tool(req.body);
+  const result = await tool.handler(req.body);
   res.json(result);
 });
 
 app.get('/mcp/tools', (req, res) => {
-  res.json({ 
-    success: true, 
-    tools: Object.keys(mcpTools),
-    endpoints: {
-      call_tool: '/mcp/tool/:tool',
-      list_tools: '/mcp/tools'
-    }
-  });
+  const tools = Object.values(mcpTools).map(tool => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema
+  }));
+  res.json({ success: true, tools, mcp_version: MCP_VERSION });
+});
+
+app.get('/mcp/resources', (req, res) => {
+  const resources = Object.values(mcpResources).map(resource => ({
+    uri: resource.uri,
+    name: resource.name, 
+    description: resource.description,
+    mimeType: resource.mimeType
+  }));
+  res.json({ success: true, resources });
+});
+
+app.get('/mcp/resource/:uri', async (req, res) => {
+  const uri = decodeURIComponent(req.params.uri);
+  const resource = mcpResources[uri];
+  if (!resource) return res.status(404).json({ error: 'Resource not found' });
+  
+  const result = await resource.handler();
+  res.json(result);
 });
 
 // Root route
 app.get('/', (req, res) => {
   res.json({
-    name: '🎯 Carmack Ultra-Minimal Pi API Hub',
-    version: '2.0.0',
-    features: ['AI Routing', 'HubSpot CRUD', 'Webhooks', 'GraphQL', 'MCP Tools', 'Pi Monitoring'],
+    name: '🎯 Carmack Ultra-Minimal Pi API Hub + MCP Server',
+    version: '2.1.0',
+    features: ['AI Routing', 'HubSpot CRUD', 'Webhooks', 'GraphQL', 'MCP Protocol', 'Pi Monitoring'],
+    mcp: {
+      version: MCP_VERSION,
+      protocol: 'JSON-RPC 2.0',
+      endpoint: '/mcp',
+      tools: Object.keys(mcpTools).length,
+      resources: Object.keys(mcpResources).length
+    },
     endpoints: {
       health: '/health',
       stats: '/stats',
@@ -548,14 +818,17 @@ app.get('/', (req, res) => {
       mark: '/api/mark/chat',
       mark2: '/api/mark2/chat',
       hubspot_get: '/api/hubspot/:endpoint',
+      hubspot_search: '/api/hubspot/:endpoint/search',
       hubspot_post: '/api/hubspot/:endpoint',
       hubspot_patch: '/api/hubspot/:endpoint/:id',
       hubspot_delete: '/api/hubspot/:endpoint/:id',
       webhooks_receive: '/webhooks/:source',
       webhooks_url: '/webhooks/url/:source',
       graphql: '/graphql',
+      mcp_jsonrpc: '/mcp',
       mcp_tools: '/mcp/tools',
-      mcp_call: '/mcp/tool/:tool'
+      mcp_resources: '/mcp/resources',
+      mcp_tool_call: '/mcp/tool/:tool'
     },
     cli: 'node ultra-minimal.js mark|mark2'
   });

@@ -7,8 +7,8 @@ Health: http://localhost:3000/health
 Stats:  http://localhost:3000/stats
 
 CLI Usage:
-  node minimal-api-hub.js mark   # Launch Mark
-  node minimal-api-hub.js mark2  # Launch Mark2
+  node ultra-minimal.js mark   # Launch Mark
+  node ultra-minimal.js mark2  # Launch Mark2
 
 API Endpoints:
   POST /api/anthropic/messages   # AI routing

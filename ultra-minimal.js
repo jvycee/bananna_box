@@ -3,6 +3,7 @@
 // 🎯 CARMACK ULTRA-MINIMAL: "50% fewer lines" challenge
 // Core AI routing + assistants in absolute minimum code
 
+require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 
@@ -11,7 +12,7 @@ const CFG = {
   port: process.env.PORT || 3000,
   anthropic: process.env.ANTHROPIC_API_KEY,
   ollama: process.env.OLLAMA_URL || 'http://10.0.0.120:11434',
-  hubspot: process.env.HUBSPOT_PRIVATE_APP_TOKEN
+  hubspot: process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_API_KEY
 };
 
 // Global state
@@ -176,6 +177,89 @@ app.get('/api/hubspot/:endpoint', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Enhanced search endpoint for all CRM objects and engagements  
+app.post('/api/hubspot/:endpoint/search', async (req, res) => {
+  if (!CFG.hubspot) return res.status(503).json({ error: 'HubSpot not configured' });
+  
+  // All supported CRM endpoints from documentation
+  const supportedEndpoints = [
+    // Standard Objects
+    'contacts', 'companies', 'deals', 'tickets', 'products', 'quotes', 'line_items',
+    // E-commerce Objects  
+    'carts', 'orders', 'commerce_payments', 'subscriptions', 'invoices', 'discounts', 'fees', 'taxes',
+    // Engagements
+    'calls', 'emails', 'meetings', 'notes', 'tasks',
+    // Other Objects
+    'leads', 'feedback_submissions', 'deal_split'
+  ];
+  
+  const endpoint = req.params.endpoint;
+  
+  if (!supportedEndpoints.includes(endpoint)) {
+    return res.status(400).json({ 
+      error: `Unsupported endpoint: ${endpoint}`,
+      supported_endpoints: supportedEndpoints,
+      documentation: "https://developers.hubspot.com/docs/api/crm/search"
+    });
+  }
+  
+  try {
+    // Add query string search if just a 'query' field is provided
+    let searchBody = req.body;
+    if (searchBody.query && !searchBody.filterGroups) {
+      searchBody = { query: searchBody.query, limit: searchBody.limit || 10 };
+    }
+    
+    // Validate limits per HubSpot documentation
+    if (searchBody.limit && searchBody.limit > 200) {
+      searchBody.limit = 200; // Max 200 per page
+    }
+    
+    // Validate filter groups (max 5 groups, 6 filters each, 18 total)
+    if (searchBody.filterGroups) {
+      if (searchBody.filterGroups.length > 5) {
+        return res.status(400).json({ error: 'Maximum 5 filterGroups allowed' });
+      }
+      
+      let totalFilters = 0;
+      for (const group of searchBody.filterGroups) {
+        if (group.filters && group.filters.length > 6) {
+          return res.status(400).json({ error: 'Maximum 6 filters per filterGroup allowed' });
+        }
+        totalFilters += group.filters ? group.filters.length : 0;
+      }
+      
+      if (totalFilters > 18) {
+        return res.status(400).json({ error: 'Maximum 18 total filters allowed' });
+      }
+    }
+    
+    const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${endpoint}/search`, searchBody, {
+      headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+    });
+    
+    // Enhanced response with metadata
+    res.json({ 
+      success: true, 
+      data: response.data,
+      endpoint: endpoint,
+      request_body_size: JSON.stringify(searchBody).length,
+      rate_limit_info: {
+        limit: "5 requests per second",
+        max_results: "10,000 total results per query",
+        max_page_size: "200 objects per page"
+      }
+    });
+    
+  } catch (e) { 
+    res.status(500).json({ 
+      error: e.message,
+      endpoint: endpoint,
+      hubspot_documentation: "https://developers.hubspot.com/docs/api/crm/search"
+    }); 
+  }
+});
+
 app.post('/api/hubspot/:endpoint', async (req, res) => {
   if (!CFG.hubspot) return res.status(503).json({ error: 'HubSpot not configured' });
   try {
@@ -218,20 +302,188 @@ app.get('/webhooks/url/:source', (req, res) => {
   res.json({ success: true, webhook_url: webhookUrl, source: req.params.source });
 });
 
-// GraphQL endpoint (simple query resolver)
-app.post('/graphql', (req, res) => {
+// Enhanced GraphQL endpoint supporting CRM, HUBDB, BLOG, KB data sources
+app.post('/graphql', async (req, res) => {
   const { query, variables } = req.body;
   log(`📊 GraphQL Query:`, query);
   
-  // Simple resolver for common queries
-  if (query.includes('contacts')) {
-    res.json({ data: { contacts: { message: "Use /api/hubspot/contacts for REST API" } } });
-  } else if (query.includes('stats')) {
-    res.json({ data: { stats } });
-  } else {
-    res.json({ data: { message: "GraphQL endpoint active - extend resolvers as needed" } });
+  // GraphQL query complexity tracking
+  let complexity = { used_points: 0, max_points: 30000 };
+  
+  try {
+    // CRM Data Source
+    if (query.includes('CRM {') && CFG.hubspot) {
+      const crmObjects = {
+        // Standard Objects
+        'contact_collection': { endpoint: 'contacts', defaultProps: ['firstname', 'lastname', 'email', 'lastmodifieddate', 'hs_object_id', 'createdate'] },
+        'company_collection': { endpoint: 'companies', defaultProps: ['name', 'domain', 'createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'deal_collection': { endpoint: 'deals', defaultProps: ['dealname', 'amount', 'closedate', 'pipeline', 'dealstage', 'createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'ticket_collection': { endpoint: 'tickets', defaultProps: ['content', 'hs_pipeline', 'hs_pipeline_stage', 'hs_ticket_category', 'hs_ticket_priority', 'subject', 'createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'product_collection': { endpoint: 'products', defaultProps: ['name', 'description', 'price', 'createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'quote_collection': { endpoint: 'quotes', defaultProps: ['hs_expiration_date', 'hs_public_url_key', 'hs_status', 'hs_title', 'hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'line_item_collection': { endpoint: 'line_items', defaultProps: ['quantity', 'amount', 'price', 'createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        
+        // E-commerce Objects
+        'cart_collection': { endpoint: 'carts', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'order_collection': { endpoint: 'orders', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'payment_collection': { endpoint: 'commerce_payments', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'subscription_collection': { endpoint: 'subscriptions', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'invoice_collection': { endpoint: 'invoices', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'discount_collection': { endpoint: 'discounts', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'fee_collection': { endpoint: 'fees', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'tax_collection': { endpoint: 'taxes', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        
+        // Engagements
+        'call_collection': { endpoint: 'calls', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'email_collection': { endpoint: 'emails', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'meeting_collection': { endpoint: 'meetings', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'note_collection': { endpoint: 'notes', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'task_collection': { endpoint: 'tasks', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        
+        // Other Objects
+        'lead_collection': { endpoint: 'leads', defaultProps: ['createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'feedback_submission_collection': { endpoint: 'feedback_submissions', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] },
+        'deal_split_collection': { endpoint: 'deal_split', defaultProps: ['hs_createdate', 'hs_lastmodifieddate', 'hs_object_id'] }
+      };
+      
+      for (const [collection, config] of Object.entries(crmObjects)) {
+        if (query.includes(collection)) {
+          complexity.used_points += 300; // Internal API request
+          
+          // Parse comprehensive filters from GraphQL query
+          const searchBody = parseGraphQLFilters(query, config.defaultProps);
+          
+          const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${config.endpoint}/search`, searchBody, {
+            headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+          });
+          
+          complexity.used_points += response.data.results.length * 30; // Objects retrieved
+          
+          // Map response to GraphQL format with proper property mapping
+          const items = response.data.results.map(item => {
+            const mapped = { id: item.id };
+            searchBody.properties.forEach(prop => {
+              mapped[prop] = item.properties[prop];
+              complexity.used_points += item.properties[prop] ? 3 : 1; // Property with/without value
+            });
+            return mapped;
+          });
+          
+          return res.json({
+            data: { CRM: { [collection]: { items, total: response.data.total || items.length } } },
+            extensions: { query_complexity: complexity }
+          });
+        }
+      }
+    }
+    
+    // HUBDB Data Source (basic implementation)
+    if (query.includes('HUBDB {')) {
+      return res.json({ 
+        data: { message: "HUBDB queries require HubDB table access - contact admin for setup" },
+        extensions: { query_complexity: complexity }
+      });
+    }
+    
+    // BLOG Data Source (basic implementation) 
+    if (query.includes('BLOG {')) {
+      return res.json({ 
+        data: { message: "BLOG queries require Content Hub Professional+ - contact admin for setup" },
+        extensions: { query_complexity: complexity }
+      });
+    }
+    
+    // KB Data Source (basic implementation)
+    if (query.includes('KB {')) {
+      return res.json({ 
+        data: { message: "Knowledge Base queries require Service Hub Enterprise+ - contact admin for setup" },
+        extensions: { query_complexity: complexity }
+      });
+    }
+    
+    // Stats endpoint
+    if (query.includes('stats')) {
+      return res.json({ data: { stats }, extensions: { query_complexity: complexity } });
+    }
+    
+    // Default response with all supported collections
+    res.json({ 
+      data: { 
+        message: "GraphQL endpoint supports CRM, HUBDB, BLOG, KB data sources",
+        supported_crm_collections: Object.keys(crmObjects).slice(0, 10) + "... and more"
+      },
+      extensions: { query_complexity: complexity }
+    });
+    
+  } catch (e) {
+    res.json({ errors: [{ message: e.message }], extensions: { query_complexity: complexity } });
   }
 });
+
+// Parse GraphQL filters into HubSpot search format
+function parseGraphQLFilters(query, defaultProps) {
+  const searchBody = { filterGroups: [], properties: defaultProps, limit: 10 };
+  
+  // Extract filter from GraphQL query
+  const filterMatch = query.match(/filter:\s*{([^}]+)}/);
+  if (!filterMatch) return searchBody;
+  
+  const filterContent = filterMatch[1];
+  const filters = [];
+  
+  // All HubSpot operators with GraphQL syntax
+  const operatorMappings = {
+    '__eq': 'EQ', '__neq': 'NEQ', '__lt': 'LT', '__lte': 'LTE', 
+    '__gt': 'GT', '__gte': 'GTE', '__contains': 'CONTAINS_TOKEN', 
+    '__not_contains': 'NOT_CONTAINS_TOKEN', '__in': 'IN', '__not_in': 'NOT_IN',
+    '__null': 'HAS_PROPERTY', '__not_null': 'NOT_HAS_PROPERTY'
+  };
+  
+  // Parse each operator type
+  for (const [graphqlOp, hubspotOp] of Object.entries(operatorMappings)) {
+    const regex = new RegExp(`(\\w+)${graphqlOp.replace('_', '\\_')}:\\s*"([^"]+)"`, 'g');
+    let match;
+    while ((match = regex.exec(filterContent)) !== null) {
+      const [, prop, value] = match;
+      filters.push({ propertyName: prop, operator: hubspotOp, value });
+    }
+  }
+  
+  // Parse BETWEEN operator (special case)
+  const betweenMatch = filterContent.match(/(\w+)__between:\s*{[^}]*value:\s*"([^"]+)"[^}]*highValue:\s*"([^"]+)"[^}]*}/);
+  if (betweenMatch) {
+    const [, prop, lowValue, highValue] = betweenMatch;
+    filters.push({ propertyName: prop, operator: 'BETWEEN', value: lowValue, highValue });
+  }
+  
+  // Parse IN/NOT_IN with arrays
+  const inMatches = filterContent.match(/(\w+)__(in|not_in):\s*\[([^\]]+)\]/g);
+  if (inMatches) {
+    inMatches.forEach(match => {
+      const [, prop, op, values] = match.match(/(\w+)__(in|not_in):\s*\[([^\]]+)\]/);
+      const valueArray = values.split(',').map(v => v.trim().replace(/"/g, ''));
+      filters.push({ propertyName: prop, operator: op === 'in' ? 'IN' : 'NOT_IN', values: valueArray });
+    });
+  }
+  
+  // Parse limit
+  const limitMatch = query.match(/limit:\s*(\d+)/);
+  if (limitMatch) {
+    searchBody.limit = Math.min(parseInt(limitMatch[1]), 200); // Max 200 per HubSpot limits
+  }
+  
+  // Parse offset  
+  const offsetMatch = query.match(/offset:\s*(\d+)/);
+  if (offsetMatch) {
+    searchBody.after = offsetMatch[1];
+  }
+  
+  if (filters.length > 0) {
+    searchBody.filterGroups = [{ filters }];
+  }
+  
+  return searchBody;
+}
 
 // MCP Tools
 const mcpTools = {

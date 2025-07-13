@@ -37,13 +37,13 @@ All core functionality in a single file:
 
 ```bash
 # Start the server
-node minimal-api-hub.js
+node ultra-minimal.js
 
 # Chat with Mark (Pi specialist)
-node minimal-api-hub.js mark
+node ultra-minimal.js mark
 
 # Chat with Mark2 (general purpose)
-node minimal-api-hub.js mark2
+node ultra-minimal.js mark2
 ```
 
 ## API Endpoints

@@ -1,0 +1,20 @@
+[2025-07-13T09:51:15.842Z] INFO: Pi API Hub (Carmack Edition) started {"port":3000,"anthropic":false,"hubspot":false,"ollama":"http://10.0.0.120:11434"}
+
+🎯 CARMACK CHALLENGE IMPLEMENTATION
+=====================================
+Server: http://localhost:3000
+Health: http://localhost:3000/health
+Stats:  http://localhost:3000/stats
+
+CLI Usage:
+  node minimal-api-hub.js mark   # Launch Mark
+  node minimal-api-hub.js mark2  # Launch Mark2
+
+API Endpoints:
+  POST /api/anthropic/messages   # AI routing
+  POST /api/mark/chat           # Mark assistant
+  POST /api/mark2/chat          # Mark2 assistant
+  GET  /api/hubspot/:endpoint   # HubSpot proxy
+
+Total lines: 1 (excluding comments)
+

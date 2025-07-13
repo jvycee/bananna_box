@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🎯 Pi Hub Mobile</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font: 12px Monaco, monospace; background: #000; color: #0f0; }
+        .mobile { padding: 10px; }
+        .card { background: #111; border: 1px solid #333; margin: 10px 0; padding: 10px; border-radius: 4px; }
+        .row { display: flex; justify-content: space-between; margin: 5px 0; }
+        .status { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .online { background: #0f0; }
+        .offline { background: #f00; }
+        .warning { background: #ff0; }
+        .value { color: #0ff; font-weight: bold; }
+        h1 { color: #0ff; text-align: center; margin: 10px 0; font-size: 16px; }
+        h2 { color: #ff0; font-size: 14px; margin-bottom: 8px; }
+        .chart-mini { height: 40px; background: #222; position: relative; overflow: hidden; margin: 5px 0; }
+        .bar-mini { position: absolute; bottom: 0; background: #0f0; width: 2px; }
+        button { background: #333; color: #0f0; border: 1px solid #555; padding: 6px 12px; margin: 3px; font-size: 11px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .alerts { background: #220; border-color: #ff0; }
+        .alert-item { color: #ff0; font-size: 11px; margin: 2px 0; }
+    </style>
+</head>
+<body>
+    <div class="mobile">
+        <h1>🎯 PI HUB MOBILE</h1>
+        
+        <!-- Critical Status -->
+        <div class="card">
+            <h2>🚦 Status</h2>
+            <div class="row">
+                <span><span class="status" id="m-system"></span>System</span>
+                <span class="value" id="m-system-text">-</span>
+            </div>
+            <div class="row">
+                <span><span class="status" id="m-ollama"></span>Ollama</span>
+                <span class="value" id="m-ollama-text">-</span>
+            </div>
+            <div class="row">
+                <span>Uptime</span>
+                <span class="value" id="m-uptime">-</span>
+            </div>
+        </div>
+
+        <!-- Metrics Grid -->
+        <div class="grid-2">
+            <div class="card">
+                <h2>📊 Requests</h2>
+                <div class="value" id="m-total-requests">-</div>
+                <div class="chart-mini" id="m-chart"></div>
+            </div>
+            
+            <div class="card">
+                <h2>🔥 System</h2>
+                <div>CPU: <span class="value" id="m-cpu">-</span></div>
+                <div>MEM: <span class="value" id="m-memory">-</span></div>
+                <div>TEMP: <span class="value" id="m-temp">-</span></div>
+            </div>
+        </div>
+
+        <!-- Alerts -->
+        <div class="card alerts" id="m-alerts-card" style="display: none;">
+            <h2>⚠️ Alerts</h2>
+            <div id="m-alerts"></div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="card">
+            <h2>⚡ Actions</h2>
+            <button onclick="testAll()">Test All</button>
+            <button onclick="refresh()">Refresh</button>
+            <button onclick="toggleDesktop()">Desktop View</button>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="card">
+            <div class="row">
+                <span>Last Update</span>
+                <span class="value" id="m-last-update">-</span>
+            </div>
+            <div class="row">
+                <span>Connection</span>
+                <span class="value" id="m-connection">-</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin.replace(':3001', ':3000'); // Assume main API on 3000
+        const AUTH_TOKEN = localStorage.getItem('auth_token') || 'homelab-default';
+        
+        let requestHistory = Array(20).fill(0);
+        let isConnected = false;
+
+        async function apiCall(endpoint) {
+            try {
+                const res = await fetch(`${API_BASE}${endpoint}`, {
+                    headers: { 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                    timeout: 5000
+                });
+                isConnected = true;
+                return res.json();
+            } catch (e) {
+                isConnected = false;
+                throw e;
+            }
+        }
+
+        async function updateMobile() {
+            try {
+                // Get metrics from dashboard server if available, fallback to main API
+                let metrics;
+                try {
+                    metrics = await fetch('/api/metrics').then(r => r.json());
+                } catch {
+                    // Fallback to basic stats
+                    const [stats, health] = await Promise.all([
+                        apiCall('/stats'),
+                        apiCall('/health')
+                    ]);
+                    metrics = { 
+                        services: stats, 
+                        dashboard: { requests: health.requests },
+                        system: { cpu: 0, memory: { percent: 0 }, temperature: 0 },
+                        alerts: []
+                    };
+                }
+
+                // Update status indicators
+                updateElement('m-system', metrics.services?.ollamaHealthy ? 'online' : 'offline');
+                updateElement('m-system-text', metrics.services?.ollamaHealthy ? 'OK' : 'DOWN');
+                updateElement('m-ollama', metrics.services?.ollamaHealthy ? 'online' : 'offline');
+                updateElement('m-ollama-text', metrics.services?.ollamaHealthy ? 'OK' : 'DOWN');
+                
+                // Update metrics
+                updateElement('m-total-requests', metrics.dashboard?.requests || '-');
+                updateElement('m-cpu', `${metrics.system?.cpu || 0}%`);
+                updateElement('m-memory', `${metrics.system?.memory?.percent || 0}%`);
+                updateElement('m-temp', `${metrics.system?.temperature || 0}°C`);
+                
+                // Update chart
+                requestHistory.shift();
+                requestHistory.push(metrics.dashboard?.requests || 0);
+                updateMiniChart();
+
+                // Update alerts
+                updateAlerts(metrics.alerts || []);
+
+                // Update connection info
+                updateElement('m-last-update', new Date().toLocaleTimeString());
+                updateElement('m-connection', isConnected ? 'ONLINE' : 'OFFLINE');
+
+            } catch (error) {
+                updateElement('m-connection', 'ERROR');
+                updateElement('m-last-update', 'Failed');
+            }
+        }
+
+        function updateElement(id, value, className = '') {
+            const el = document.getElementById(id);
+            if (el) {
+                if (className) el.className = className;
+                if (el.tagName === 'SPAN' && el.classList.contains('status')) {
+                    el.className = `status ${value}`;
+                } else {
+                    el.textContent = value;
+                }
+            }
+        }
+
+        function updateMiniChart() {
+            const chart = document.getElementById('m-chart');
+            chart.innerHTML = '';
+            
+            const max = Math.max(...requestHistory, 1);
+            requestHistory.forEach((value, index) => {
+                const bar = document.createElement('div');
+                bar.className = 'bar-mini';
+                bar.style.left = `${index * 3}px`;
+                bar.style.height = `${(value / max) * 30}px`;
+                chart.appendChild(bar);
+            });
+        }
+
+        function updateAlerts(alerts) {
+            const alertsCard = document.getElementById('m-alerts-card');
+            const alertsContainer = document.getElementById('m-alerts');
+            
+            if (alerts.length > 0) {
+                alertsCard.style.display = 'block';
+                alertsContainer.innerHTML = alerts.map(alert => 
+                    `<div class="alert-item">${alert.message}</div>`
+                ).join('');
+            } else {
+                alertsCard.style.display = 'none';
+            }
+        }
+
+        async function testAll() {
+            updateElement('m-connection', 'TESTING...');
+            try {
+                await apiCall('/health');
+                await apiCall('/stats');
+                updateElement('m-connection', 'TEST OK');
+                setTimeout(() => updateMobile(), 1000);
+            } catch (e) {
+                updateElement('m-connection', 'TEST FAILED');
+            }
+        }
+
+        function refresh() {
+            updateMobile();
+        }
+
+        function toggleDesktop() {
+            window.location.href = '/dashboard';
+        }
+
+        // Auto-refresh every 10 seconds
+        updateMobile();
+        setInterval(updateMobile, 10000);
+        
+        // Handle visibility change to refresh when app becomes active
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) updateMobile();
+        });
+    </script>
+</body>
+</html>

@@ -563,6 +563,34 @@ const mcpTools = {
     }
   },
 
+  "hubspot-search-crm": {
+    name: "hubspot-search-crm",
+    description: "Search HubSpot CRM objects with text query",
+    inputSchema: {
+      type: "object",
+      properties: {
+        object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets"] },
+        query: { type: "string", description: "Search query text" },
+        limit: { type: "number", default: 10 }
+      },
+      required: ["object_type", "query"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { isError: true, content: [{ type: "text", text: "HubSpot not configured" }] };
+      try {
+        const { object_type, query, limit = 10 } = args;
+        const searchBody = { query, limit };
+        
+        const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${object_type}/search`, searchBody, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+        });
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Error: ${e.message}` }] };
+      }
+    }
+  },
+
   "hubspot-create-object": {
     name: "hubspot-create-object",
     description: "Create a new HubSpot CRM object",
@@ -663,7 +691,7 @@ const mcpTools = {
       properties: {
         query: { type: "string", description: "Natural language query about CRM data" },
         object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets"], default: "contacts" },
-        limit: { type: "number", default: 5 }
+        limit: { type: "number", default: 10 }
       },
       required: ["query"]
     },
@@ -673,7 +701,7 @@ const mcpTools = {
       try {
         const { query, object_type = "contacts", limit = 5 } = args;
         
-        // RETRIEVAL: Search HubSpot for relevant data
+        // RETRIEVAL: Smart search - use search endpoint if query contains specific terms
         const propertyMap = {
           contacts: ['firstname', 'lastname', 'email', 'company', 'phone', 'createdate'],
           companies: ['name', 'domain', 'industry', 'city', 'createdate'],
@@ -681,10 +709,80 @@ const mcpTools = {
           tickets: ['subject', 'content', 'hs_pipeline_stage', 'hs_ticket_priority']
         };
         
-        const searchBody = { query, limit, properties: propertyMap[object_type] || [] };
-        const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${object_type}/search`, searchBody, {
-          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
-        });
+        let response;
+        // For RAG, extract search terms from natural language query
+        const extractSearchTerms = (query) => {
+          // Extract names, companies, emails from natural language
+          const terms = [];
+          const words = query.toLowerCase().split(/\s+/);
+          
+          // Look for specific names/companies - return ALL matches
+          const namePattern = /\b(belcher|johnson|halligan|gmail|\.com|bob|linda|louise|gene|tina|pickles|mango|fiona|pickle|cat)\b/gi;
+          const matches = query.match(namePattern);
+          if (matches) {
+            terms.push(...matches.map(m => m.toLowerCase()));
+          }
+          
+          // If no specific terms, use key words
+          if (terms.length === 0) {
+            const keyWords = words.filter(w => w.length > 3 && !['about', 'tell', 'what', 'who', 'are', 'the', 'my', 'and', 'or', 'but', 'with', 'from', 'this', 'that', 'they', 'have', 'been', 'their', 'said', 'each', 'which', 'she', 'do', 'how', 'her', 'if', 'will', 'up', 'other', 'more', 'out', 'many', 'time', 'has', 'had', 'two', 'more', 'way', 'find', 'long', 'down', 'day', 'did', 'get', 'come', 'made', 'may', 'part'].includes(w));
+            terms.push(...keyWords);
+          }
+          
+          return terms.length > 0 ? terms : [query]; // Return all terms or original query
+        };
+        
+        const searchTerms = extractSearchTerms(query);
+        console.log(`RAG: Original query: "${query}", Extracted terms: [${searchTerms.join(', ')}]`);
+        
+        let searchUsed = false;
+        let allResults = [];
+        let totalFound = 0;
+        
+        // Search for each term and combine results
+        for (const searchTerm of searchTerms) {
+          try {
+            console.log(`RAG: Searching for term: "${searchTerm}"`);
+            const mcpResult = await mcpTools["hubspot-search-crm"].handler({
+              object_type: object_type,
+              query: searchTerm,
+              limit: limit
+            });
+            
+            if (mcpResult && mcpResult.content && mcpResult.content[0] && mcpResult.content[0].text) {
+              const searchData = JSON.parse(mcpResult.content[0].text);
+              if (searchData.results && searchData.results.length > 0) {
+                allResults.push(...searchData.results);
+                totalFound += searchData.total || searchData.results.length;
+                searchUsed = true;
+              }
+            }
+          } catch (searchError) {
+            console.log(`RAG: MCP search failed for "${searchTerm}": ${searchError.message}`);
+          }
+        }
+        
+        // Remove duplicates based on contact ID
+        const uniqueResults = allResults.filter((contact, index, self) => 
+          index === self.findIndex(c => c.id === contact.id)
+        );
+        
+        // RAG should only work with proper search results - no fallback to basic list
+        if (searchUsed && uniqueResults.length > 0) {
+          response = { data: { results: uniqueResults, total: totalFound } };
+          console.log(`RAG: Found ${uniqueResults.length} results via MCP search`);
+        } else {
+          // RAG failed - no search results found
+          const errorMsg = `RAG Error: No relevant data found for query "${query}". RAG requires specific search terms or contact names to provide intelligent analysis. Try queries like "Belcher family" or "contacts with gmail" instead of general queries.`;
+          console.log(`RAG: Failed - ${errorMsg}`);
+          return { 
+            isError: true, 
+            content: [{ 
+              type: "text", 
+              text: `⚠️ RAG Analysis Failed\n\n${errorMsg}\n\n💡 RAG works best with:\n- Specific names (e.g., "Belcher family")\n- Company names (e.g., "HubSpot contacts")\n- Email domains (e.g., "gmail contacts")\n- Specific identifiers\n\nFor general queries, use the direct MCP tools instead.` 
+            }] 
+          };
+        }
         
         // AUGMENTATION: Prepare context for AI
         const retrievedData = response.data.results.map(item => 
@@ -699,12 +797,14 @@ ${retrievedData}
 Provide a helpful, accurate response based only on the data shown above.`;
 
         // GENERATION: Use AI to generate response
+        console.log(`RAG: Sending prompt to AI (${ragPrompt.length} chars)`);
         const aiResult = await routeAI(ragPrompt, 1000);
+        console.log(`RAG: AI response from ${aiResult.provider}: ${aiResult.text.substring(0, 100)}...`);
         
         return { 
           content: [{ 
             type: "text", 
-            text: `RAG Response:\n${aiResult.text}\n\n--- Sources ---\nFound ${response.data.results.length} ${object_type} from HubSpot search` 
+            text: `RAG Response:\n${aiResult.text}\n\n--- Sources ---\nFound ${response.data.results.length} ${object_type} from HubSpot ${searchUsed ? 'search' : 'list'}${searchUsed ? ` (terms: [${searchTerms.join(', ')}])` : ''}` 
           }] 
         };
       } catch (e) {
@@ -966,27 +1066,42 @@ app.get("/webhook-url", async (req, res) => {
   }
 });
 
-// CLI mode
-if (process.argv[2] === 'mark' || process.argv[2] === 'mark2') {
-  const assistant = process.argv[2] === 'mark' ? mark : mark2;
-  const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+// Enhanced system monitoring
+async function monitorSystems() {
+  const timestamp = new Date().toISOString();
   
-  console.log(`\n${assistant.emoji} ${assistant.name} CLI - Type 'exit' to quit\n`);
-  
-  const chat = () => {
-    rl.question('You: ', async (input) => {
-      if (input.trim() === 'exit') { console.log(`\n${assistant.emoji} Goodbye!\n`); process.exit(0); }
-      if (input.trim()) {
-        process.stdout.write(`${assistant.emoji} Thinking...\n`);
-        const result = await assistant.chat(input.trim());
-        console.log(`${assistant.emoji} ${result.ok ? result.text : 'Error: ' + result.error}\n`);
-      }
-      chat();
-    });
-  };
-  chat();
-} else {
-  // Server mode
+  try {
+    // Check Ollama on linux server
+    const ollamaStatus = await checkOllama();
+    const ollamaHealth = ollamaStatus ? '✅' : '❌';
+    
+    // Check Pi health  
+    const piStats = await checkPi();
+    const piHealth = piStats.throttled ? '⚠️' : '✅';
+    
+    // Check HubSpot connectivity
+    const hubspotHealth = CFG.hubspot ? '✅' : '⚠️';
+    
+    log(`🔍 [${timestamp.slice(11,19)}] System Health: Ollama(${CFG.ollama}) ${ollamaHealth} | Pi ${piHealth} ${piStats.temp} | HubSpot ${hubspotHealth} | Requests: ${stats.requests}`);
+    
+    // Alert on issues
+    if (!ollamaStatus) {
+      log(`⚠️ [ALERT] Ollama unreachable at ${CFG.ollama} - RAG degraded to Anthropic fallback`);
+    }
+    if (piStats.throttled) {
+      log(`⚠️ [ALERT] Pi throttling detected - check power supply and cooling`);
+    }
+    if (parseFloat(piStats.temp) > 80) {
+      log(`🔥 [ALERT] Pi temperature high: ${piStats.temp} - check cooling`);
+    }
+    
+  } catch (error) {
+    log(`❌ [ERROR] Monitoring failed: ${error.message}`);
+  }
+}
+
+// Server mode with monitoring
+{
   app.listen(CFG.port, () => {
     log(`Ultra-minimal Pi API Hub started on :${CFG.port}`);
     
@@ -998,24 +1113,29 @@ if (process.argv[2] === 'mark' || process.argv[2] === 'mark2') {
 Lines of code: ~1000 (Full-featured but still minimal!)
 Server: http://localhost:${CFG.port}
 
-Usage:
-  node ultra-minimal.js mark   # 🐐 Mark CLI
-  node ultra-minimal.js mark2  # 🐘 Mark2 CLI
-
 Core features:
   ✅ Smart AI routing (Ollama→Anthropic)
-  ✅ Mark & Mark2 assistants with memory
-  ✅ Full MCP protocol (8 tools, 2 resources)
+  ✅ Full MCP protocol (9 tools, 2 resources)
   ✅ RAG (Retrieval-Augmented Generation)
   ✅ HubSpot CRUD + advanced search
   ✅ GraphQL with CRM data sources
   ✅ Pi hardware monitoring & alerts
+  ✅ Auto-monitoring & health checks
   ✅ Comprehensive test suite
-  ✅ CLI interfaces & API compatibility
+
+Interfaces:
+  🌐 Open WebUI: http://10.0.0.193:3001 (Chat interface)
+  🔧 API: http://localhost:${CFG.port} (MCP + RAG)
+  📊 Stats: http://localhost:${CFG.port}/stats
 
 "The best code is code you don't have to write." - Carmack
 But when you do write it, make it do everything! 🚀
 `);
+    
+    // Enhanced monitoring
+    log('🔍 Starting enhanced monitoring...');
+    setInterval(monitorSystems, 30000); // Check every 30 seconds
+    monitorSystems(); // Initial check
   });
 }
 

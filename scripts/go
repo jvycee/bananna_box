@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# 🎯 Bananna Box Server Control - Simple semantic commands
+
+case "${1:-help}" in
+    "server")
+        echo "🚀 Starting Bananna Box server..."
+        sudo systemctl start bananna-box
+        sleep 2
+        sudo systemctl status bananna-box --no-pager -l
+        ;;
+    "restart")
+        echo "🔄 Restarting Bananna Box server..."
+        sudo systemctl restart bananna-box
+        sleep 2
+        sudo systemctl status bananna-box --no-pager -l
+        ;;
+    "stop")
+        echo "🛑 Stopping Bananna Box server..."
+        sudo systemctl stop bananna-box
+        sudo systemctl status bananna-box --no-pager -l
+        ;;
+    "status"|"check")
+        echo "📊 Bananna Box Server Status:"
+        sudo systemctl status bananna-box --no-pager -l
+        ;;
+    "logs"|"watch")
+        echo "📋 Live server logs (Ctrl+C to exit):"
+        journalctl -u bananna-box -f
+        ;;
+    "health")
+        echo "🔍 Server Health Check:"
+        curl -s http://localhost:3000/health | jq 2>/dev/null || echo "Server not responding"
+        ;;
+    "stats")
+        echo "📈 Server Statistics:"
+        curl -s http://localhost:3000/stats | jq 2>/dev/null || echo "Server not responding"
+        ;;
+    "test")
+        echo "🧪 Running test suite..."
+        ./scripts/test-live-data.sh
+        ;;
+    "help"|*)
+        echo "🎯 Bananna Box Server Control"
+        echo "============================="
+        echo "Usage: ./scripts/go <command>"
+        echo ""
+        echo "Commands:"
+        echo "  server     🚀 Start the server"
+        echo "  restart    🔄 Restart the server"
+        echo "  stop       🛑 Stop the server"
+        echo "  status     📊 Show server status"
+        echo "  logs       📋 View live logs"
+        echo "  health     🔍 Quick health check"
+        echo "  stats      📈 Show server stats"
+        echo "  test       🧪 Run test suite"
+        echo "  help       ❓ Show this help"
+        echo ""
+        echo "Examples:"
+        echo "  ./scripts/go server    # Start server"
+        echo "  ./scripts/go restart   # Restart server"
+        echo "  ./scripts/go logs      # Watch logs"
+        ;;
+esac

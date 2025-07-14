@@ -1,0 +1,27 @@
+[Unit]
+Description=Bananna Box Ultra-Minimal MCP Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=jvycee
+Group=jvycee
+WorkingDirectory=/home/jvycee/bananna_box
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/jvycee/bananna_box/ultra-minimal.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bananna-box
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/home/jvycee/bananna_box
+
+[Install]
+WantedBy=multi-user.target

@@ -652,6 +652,119 @@ const mcpTools = {
       const data = { stats, pi, uptime: process.uptime() };
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
+  },
+
+  // RAG-Enhanced Tools - Retrieval-Augmented Generation
+  "rag-hubspot-query": {
+    name: "rag-hubspot-query",
+    description: "RAG-enhanced CRM queries: retrieve HubSpot data and generate intelligent responses",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural language query about CRM data" },
+        object_type: { type: "string", enum: ["contacts", "companies", "deals", "tickets"], default: "contacts" },
+        limit: { type: "number", default: 5 }
+      },
+      required: ["query"]
+    },
+    handler: async (args) => {
+      if (!CFG.hubspot) return { isError: true, content: [{ type: "text", text: "HubSpot not configured" }] };
+      
+      try {
+        const { query, object_type = "contacts", limit = 5 } = args;
+        
+        // RETRIEVAL: Search HubSpot for relevant data
+        const propertyMap = {
+          contacts: ['firstname', 'lastname', 'email', 'company', 'phone', 'createdate'],
+          companies: ['name', 'domain', 'industry', 'city', 'createdate'],
+          deals: ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate'],
+          tickets: ['subject', 'content', 'hs_pipeline_stage', 'hs_ticket_priority']
+        };
+        
+        const searchBody = { query, limit, properties: propertyMap[object_type] || [] };
+        const response = await axios.post(`https://api.hubapi.com/crm/v3/objects/${object_type}/search`, searchBody, {
+          headers: { Authorization: `Bearer ${CFG.hubspot}`, 'Content-Type': 'application/json' }, timeout: 10000
+        });
+        
+        // AUGMENTATION: Prepare context for AI
+        const retrievedData = response.data.results.map(item => 
+          `${object_type.slice(0,-1)} ${item.id}: ${JSON.stringify(item.properties, null, 2)}`
+        ).join('\n\n');
+        
+        const ragPrompt = `Based on this HubSpot ${object_type} data, answer the query: "${query}"
+
+Retrieved Data:
+${retrievedData}
+
+Provide a helpful, accurate response based only on the data shown above.`;
+
+        // GENERATION: Use AI to generate response
+        const aiResult = await routeAI(ragPrompt, 1000);
+        
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `RAG Response:\n${aiResult.text}\n\n--- Sources ---\nFound ${response.data.results.length} ${object_type} from HubSpot search` 
+          }] 
+        };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `RAG Error: ${e.message}` }] };
+      }
+    }
+  },
+
+  "rag-pi-assistant": {
+    name: "rag-pi-assistant", 
+    description: "RAG-enhanced Pi troubleshooting: retrieve system data and generate solutions",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issue: { type: "string", description: "Describe the Pi issue or question" }
+      },
+      required: ["issue"]
+    },
+    handler: async (args) => {
+      try {
+        const { issue } = args;
+        
+        // RETRIEVAL: Get current Pi stats and logs
+        const pi = await checkPi();
+        const systemData = {
+          temperature: pi.temp + '°C',
+          throttled: pi.throttled,
+          storage: pi.storage + '% free',
+          requests: stats.requests,
+          errors: stats.errors,
+          ai_providers: { ollama: stats.ollama, anthropic: stats.anthropic }
+        };
+        
+        // AUGMENTATION: Prepare troubleshooting context
+        const ragPrompt = `You are a Raspberry Pi expert. Help troubleshoot this issue: "${issue}"
+
+Current Pi System Data:
+${JSON.stringify(systemData, null, 2)}
+
+Common Pi Issues Knowledge:
+- High temp (>80°C): Check cooling, reduce CPU load
+- Throttling: Power supply issues, overheating  
+- Low storage (<20%): Clean logs, remove unused files
+- High errors: Network issues, API timeouts
+
+Provide specific, actionable troubleshooting steps based on the current system data.`;
+
+        // GENERATION: AI-powered troubleshooting
+        const aiResult = await routeAI(ragPrompt, 1000);
+        
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `Pi Troubleshooting (RAG):\n${aiResult.text}\n\n--- System Data ---\n${JSON.stringify(systemData, null, 2)}` 
+          }] 
+        };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Pi RAG Error: ${e.message}` }] };
+      }
+    }
   }
 };
 
@@ -880,9 +993,9 @@ if (process.argv[2] === 'mark' || process.argv[2] === 'mark2') {
     // Start Pi monitoring
     setInterval(checkPi, 60000);
     
-    console.log(`\n🎯 CARMACK ULTRA-MINIMAL EDITION + PI GUARDIAN
-================================================
-Lines of code: ~140 (Pi hardware monitoring included!)
+    console.log(`\n🎯 CARMACK ULTRA-MINIMAL EDITION + MCP + RAG
+=====================================================
+Lines of code: ~1000 (Full-featured but still minimal!)
 Server: http://localhost:${CFG.port}
 
 Usage:
@@ -892,12 +1005,16 @@ Usage:
 Core features:
   ✅ Smart AI routing (Ollama→Anthropic)
   ✅ Mark & Mark2 assistants with memory
-  ✅ Health monitoring & stats
-  ✅ HubSpot proxy
-  ✅ CLI interfaces
-  ✅ API compatibility
+  ✅ Full MCP protocol (8 tools, 2 resources)
+  ✅ RAG (Retrieval-Augmented Generation)
+  ✅ HubSpot CRUD + advanced search
+  ✅ GraphQL with CRM data sources
+  ✅ Pi hardware monitoring & alerts
+  ✅ Comprehensive test suite
+  ✅ CLI interfaces & API compatibility
 
 "The best code is code you don't have to write." - Carmack
+But when you do write it, make it do everything! 🚀
 `);
   });
 }

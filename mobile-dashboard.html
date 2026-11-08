@@ -95,32 +95,37 @@
         let requestHistory = Array(20).fill(0);
         let isConnected = false;
 
+        function connectionStateFromPoll(metricsOk, apiOk) {
+            if (metricsOk === true || apiOk === true) return 'ONLINE';
+            return 'OFFLINE';
+        }
+
         async function apiCall(endpoint) {
-            try {
-                const res = await fetch(`${API_BASE}${endpoint}`, {
-                    headers: { 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                    timeout: 5000
-                });
-                isConnected = true;
-                return res.json();
-            } catch (e) {
-                isConnected = false;
-                throw e;
-            }
+            const res = await fetch(`${API_BASE}${endpoint}`, {
+                headers: { 'Authorization': `Bearer ${AUTH_TOKEN}` }
+            });
+            if (!res.ok) throw new Error('request failed');
+            return res.json();
         }
 
         async function updateMobile() {
             try {
                 // Get metrics from dashboard server if available, fallback to main API
                 let metrics;
+                let metricsOk = false;
+                let apiOk = false;
                 try {
-                    metrics = await fetch('/api/metrics').then(r => r.json());
+                    const res = await fetch('/api/metrics');
+                    if (!res.ok) throw new Error('metrics unavailable');
+                    metrics = await res.json();
+                    metricsOk = true;
                 } catch {
                     // Fallback to basic stats
                     const [stats, health] = await Promise.all([
                         apiCall('/stats'),
                         apiCall('/health')
                     ]);
+                    apiOk = true;
                     metrics = { 
                         services: stats, 
                         dashboard: { requests: health.requests },
@@ -128,6 +133,7 @@
                         alerts: []
                     };
                 }
+                isConnected = metricsOk || apiOk;
 
                 // Update status indicators
                 updateElement('m-system', metrics.services?.ollamaHealthy ? 'online' : 'offline');
@@ -151,9 +157,10 @@
 
                 // Update connection info
                 updateElement('m-last-update', new Date().toLocaleTimeString());
-                updateElement('m-connection', isConnected ? 'ONLINE' : 'OFFLINE');
+                updateElement('m-connection', connectionStateFromPoll(metricsOk, apiOk));
 
             } catch (error) {
+                isConnected = false;
                 updateElement('m-connection', 'ERROR');
                 updateElement('m-last-update', 'Failed');
             }

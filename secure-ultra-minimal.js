@@ -187,8 +187,14 @@ if (process.argv[2] === 'mark' || process.argv[2] === 'mark2') {
   };
   chat();
 } else {
-  // Server mode with key rotation
-  setInterval(rotateApiKey, 24 * 60 * 60 * 1000); // Daily key rotation check
+  // Server mode with key rotation. The file write does not change this process unless the verifier is updated.
+  setInterval(() => {
+    rotateApiKey({
+      onRotated: (token) => {
+        CFG.authToken = token;
+      }
+    });
+  }, 24 * 60 * 60 * 1000); // Daily key rotation check
   
   app.listen(CFG.port, () => {
     log(`Secure ultra-minimal Pi API Hub started on :${CFG.port}`);

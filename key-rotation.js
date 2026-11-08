@@ -5,22 +5,23 @@
 const fs = require('fs');
 const crypto = require('crypto');
 
-const ENV_FILE = process.env.ENV_FILE || '/home/jvycee/pi-api-hub/.env';
+const DEFAULT_ENV_FILE = process.env.ENV_FILE || '/home/jvycee/pi-api-hub/.env';
 const ROTATION_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-function rotateApiKey() {
+function rotateApiKey(options = {}) {
+  const envFile = options.envFile || DEFAULT_ENV_FILE;
   try {
-    const env = fs.readFileSync(ENV_FILE, 'utf8');
+    const env = fs.readFileSync(envFile, 'utf8');
     const lines = env.split('\n');
     const rotationKey = `LAST_KEY_ROTATION=${Date.now()}`;
     
     // Check if rotation needed
     const lastRotation = lines.find(l => l.startsWith('LAST_KEY_ROTATION='));
     if (lastRotation) {
-      const lastTime = parseInt(lastRotation.split('=')[1]);
+      const lastTime = parseInt(lastRotation.split('=')[1], 10);
       if (Date.now() - lastTime < ROTATION_INTERVAL) {
         console.log('⏳ Key rotation not due yet');
-        return;
+        return { rotated: false };
       }
     }
     
@@ -31,10 +32,13 @@ function rotateApiKey() {
       .concat([`INTERNAL_AUTH_TOKEN=${newToken}`, rotationKey])
       .filter(l => l.trim());
     
-    fs.writeFileSync(ENV_FILE, updatedLines.join('\n') + '\n');
+    fs.writeFileSync(envFile, updatedLines.join('\n') + '\n');
+    if (typeof options.onRotated === 'function') options.onRotated(newToken);
     console.log('🔄 API key rotated successfully');
+    return { rotated: true };
   } catch (e) {
     console.log('❌ Key rotation failed:', e.message);
+    return { rotated: false };
   }
 }
 

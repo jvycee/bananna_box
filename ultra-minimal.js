@@ -6,6 +6,7 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const { createCachedProbe } = require('./health-cache');
 
 // Config
 const CFG = {
@@ -17,48 +18,69 @@ const CFG = {
 
 // Global state
 let stats = { anthropic: 0, ollama: 0, errors: 0, requests: 0 };
-let ollamaHealthy = false;
-let lastCheck = 0;
 
-// Pi Guardian - Carmack ultra-minimal hardware monitoring
-let piHealth = { temp: 0, throttled: false, storage: 100, lastPiCheck: 0 };
+// Pi Guardian - Carmack ultra-minimal hardware monitoring.
+// lastPiCheck moves only when a sample is complete. ok is false until then.
+let piHealth = { temp: 0, throttled: false, storage: 100, lastPiCheck: 0, ok: false };
+
+function execCommand(cmd) {
+  const { exec } = require('child_process');
+  return new Promise((resolve, reject) => {
+    exec(cmd, { timeout: 5000 }, (err, stdout) => err ? reject(err) : resolve(stdout.trim()));
+  });
+}
+
+async function readPiSample() {
+  const temp = await execCommand('vcgencmd measure_temp');
+  const tempMatch = temp.match(/[\d.]+/);
+  if (!tempMatch) throw new Error('temp unavailable');
+  const throttled = await execCommand('vcgencmd get_throttled');
+  const df = await execCommand('df / | tail -1');
+  const usedField = df.split(/\s+/)[4];
+  if (!usedField) throw new Error('storage unavailable');
+  return {
+    temp: parseFloat(tempMatch[0]),
+    throttled: throttled.includes('0x50000') || throttled.includes('0x50005'),
+    storage: 100 - parseInt(usedField.replace('%', ''), 10)
+  };
+}
+
+const piCache = createCachedProbe({ ttlMs: 30000, run: readPiSample });
 
 async function checkPi() {
-  if (Date.now() - piHealth.lastPiCheck < 30000) return piHealth;
-  try {
-    const { exec } = require('child_process');
-    const execPromise = (cmd) => new Promise((resolve, reject) => {
-      exec(cmd, { timeout: 5000 }, (err, stdout) => err ? reject(err) : resolve(stdout.trim()));
-    });
-    
-    const temp = await execPromise('vcgencmd measure_temp');
-    piHealth.temp = parseFloat(temp.match(/[\d.]+/)[0]);
-    
-    const throttled = await execPromise('vcgencmd get_throttled');
-    piHealth.throttled = throttled.includes('0x50000') || throttled.includes('0x50005');
-    
-    const df = await execPromise('df / | tail -1');
-    piHealth.storage = 100 - parseInt(df.split(/\s+/)[4].replace('%', ''));
-    
+  const result = await piCache.read();
+  if (result.ok && result.value) {
+    piHealth.temp = result.value.temp;
+    piHealth.throttled = result.value.throttled;
+    piHealth.storage = result.value.storage;
+    piHealth.lastPiCheck = result.checkedAt;
+    piHealth.ok = true;
     if (piHealth.temp > 75) log(`🔥 Pi temp high: ${piHealth.temp}°C`);
-    
-  } catch { /* Pi commands not available */ }
-  piHealth.lastPiCheck = Date.now();
+  } else {
+    piHealth.ok = false;
+  }
   return piHealth;
 }
 
 // Ultra-simple logger
 const log = (msg, data = '') => console.log(`[${new Date().toISOString().slice(11,19)}] ${msg}`, data);
 
-// Health check with 30s cache
+// Health check with 30s single-flight cache. A failed generate does not clear this bit.
+const ollamaCache = createCachedProbe({
+  ttlMs: 30000,
+  run: async () => {
+    try {
+      await axios.get(`${CFG.ollama}/api/tags`, { timeout: 3000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+});
+
 async function checkOllama() {
-  if (Date.now() - lastCheck < 30000) return ollamaHealthy;
-  try {
-    await axios.get(`${CFG.ollama}/api/tags`, { timeout: 3000 });
-    ollamaHealthy = true;
-  } catch { ollamaHealthy = false; }
-  lastCheck = Date.now();
-  return ollamaHealthy;
+  const result = await ollamaCache.read();
+  return result.ok ? result.value : false;
 }
 
 // AI Router - Ollama first, Anthropic fallback
@@ -130,7 +152,7 @@ app.get('/health', async (req, res) => {
   const pi = await checkPi();
   res.json({ 
     status: 'ok', uptime: process.uptime(), requests: stats.requests,
-    pi: { temp: pi.temp + '°C', throttled: pi.throttled, storage: pi.storage + '% free' }
+    pi: { temp: pi.temp + '°C', throttled: pi.throttled, storage: pi.storage + '% free', ok: pi.ok === true }
   });
 });
 

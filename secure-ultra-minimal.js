@@ -4,6 +4,7 @@
 
 const express = require('express');
 const axios = require('axios');
+const { createCachedProbe } = require('./health-cache');
 const { createLogger } = require('./request-logger');
 const { rateLimiter } = require('./rate-limiter');
 const { rotateApiKey } = require('./key-rotation');
@@ -19,8 +20,6 @@ const CFG = {
 
 // Global state
 let stats = { anthropic: 0, ollama: 0, errors: 0, requests: 0 };
-let ollamaHealthy = false;
-let lastCheck = 0;
 
 // Simple auth for home lab
 const auth = (req, res, next) => {
@@ -34,15 +33,22 @@ const clean = (str) => str?.replace(/[<>\"'&]/g, '').slice(0, 2000) || '';
 
 const log = (msg, data = '') => console.log(`[${new Date().toISOString().slice(11,19)}] ${msg}`, data);
 
-// Health check with 30s cache
+// Health check with 30s single-flight cache. A failed generate does not clear this bit.
+const ollamaCache = createCachedProbe({
+  ttlMs: 30000,
+  run: async () => {
+    try {
+      await axios.get(`${CFG.ollama}/api/tags`, { timeout: 3000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+});
+
 async function checkOllama() {
-  if (Date.now() - lastCheck < 30000) return ollamaHealthy;
-  try {
-    await axios.get(`${CFG.ollama}/api/tags`, { timeout: 3000 });
-    ollamaHealthy = true;
-  } catch { ollamaHealthy = false; }
-  lastCheck = Date.now();
-  return ollamaHealthy;
+  const result = await ollamaCache.read();
+  return result.ok ? result.value : false;
 }
 
 // AI Router with input sanitization
